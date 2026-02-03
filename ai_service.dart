@@ -19,38 +19,25 @@ class AiService {
     final keywords = <String>[];
 
     try {
-      // 1) Object labels
       final labels = await _imageLabeler.processImage(inputImage);
       for (final label in labels) {
         final t = _normalize(label.label);
         if (t.length >= 2) keywords.add(t);
       }
 
-      // 2) OCR text
+      // IMPORTANT: For google_mlkit_text_recognition ^0.14.0
       final recognizedText = await _textRecognizer.processImage(inputImage);
 
       for (final block in recognizedText.blocks) {
         final cleaned = _normalize(block.text);
-
-        // Break into tokens to reduce huge noise blocks
         final tokens = cleaned.split(' ').where((w) => w.length >= 3).toList();
         if (tokens.isEmpty) continue;
-
-        // Add some tokens (limit to avoid huge DB)
-        // Example: keep only first 25 tokens per block
         keywords.addAll(tokens.take(25));
       }
-    } catch (e) {
-      // ignore errors per file
-    }
+    } catch (_) {}
 
-    // Remove duplicates
     final unique = keywords.toSet().toList();
-
-    // Limit total keyword count (keeps DB small + fast)
-    final limited = unique.take(200).toList();
-
-    return limited.join(' ');
+    return unique.take(200).join(' ');
   }
 
   String _normalize(String s) {
