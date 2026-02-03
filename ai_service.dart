@@ -3,44 +3,62 @@ import 'package:google_mlkit_image_labeling/google_mlkit_image_labeling.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 
 class AiService {
-  late ImageLabeler _imageLabeler;
-  late TextRecognizer _textRecognizer;
+  late final ImageLabeler _imageLabeler;
+  late final TextRecognizer _textRecognizer;
 
   AiService() {
-    // Initialize the AI models
-    // Confidence threshold 0.7 means "Only tell me if you are 70% sure"
     _imageLabeler = ImageLabeler(
       options: ImageLabelerOptions(confidenceThreshold: 0.7),
     );
     _textRecognizer = TextRecognizer();
   }
 
-  /// Takes a file and returns a string of keywords (e.g., "car road wifi password")
   Future<String> analyzeImage(File imageFile) async {
     final inputImage = InputImage.fromFile(imageFile);
-    List<String> keywords = [];
+
+    final keywords = <String>[];
 
     try {
-      // 1. Detect Objects (Scene understanding)
+      // 1) Object labels
       final labels = await _imageLabeler.processImage(inputImage);
-      for (var label in labels) {
-        keywords.add(label.label.toLowerCase());
+      for (final label in labels) {
+        final t = _normalize(label.label);
+        if (t.length >= 2) keywords.add(t);
       }
 
-      // 2. Read Text (OCR for screenshots/documents)
-      final recognizedText = await _textRecognizer.processText(inputImage);
-      for (var block in recognizedText.blocks) {
-        // Only add text if it's long enough to be useful (avoids random noise)
-        if (block.text.length > 3) {
-          keywords.add(block.text.toLowerCase());
-        }
+      // 2) OCR text
+      final recognizedText = await _textRecognizer.processImage(inputImage);
+
+      for (final block in recognizedText.blocks) {
+        final cleaned = _normalize(block.text);
+
+        // Break into tokens to reduce huge noise blocks
+        final tokens = cleaned.split(' ').where((w) => w.length >= 3).toList();
+        if (tokens.isEmpty) continue;
+
+        // Add some tokens (limit to avoid huge DB)
+        // Example: keep only first 25 tokens per block
+        keywords.addAll(tokens.take(25));
       }
     } catch (e) {
-      print("AI Error for ${imageFile.path}: $e");
+      // ignore errors per file
     }
 
-    // Combine everything into one searchable string
-    return keywords.join(" ");
+    // Remove duplicates
+    final unique = keywords.toSet().toList();
+
+    // Limit total keyword count (keeps DB small + fast)
+    final limited = unique.take(200).toList();
+
+    return limited.join(' ');
+  }
+
+  String _normalize(String s) {
+    return s
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9\s]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
   }
 
   void dispose() {
