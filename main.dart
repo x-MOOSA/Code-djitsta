@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:photo_manager/photo_manager.dart';
+import 'package:photo_manager_image_provider/photo_manager_image_provider.dart';
 import 'package:provider/provider.dart';
 
 import 'providers/gallery_provider.dart';
@@ -206,42 +207,17 @@ class _GalleryScreenState extends State<GalleryScreen> {
       );
     }
 
-    return Stack(
-      children: [
-        GridView.builder(
-          controller: _scrollController,
-          padding: const EdgeInsets.all(4),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
-            crossAxisSpacing: 2,
-            mainAxisSpacing: 2,
-            childAspectRatio: 1.0,
-          ),
-          itemCount: provider.assets.length,
-          itemBuilder: (_, index) => _buildImageTile(provider.assets[index]),
-        ),
-
-        // Loading more indicator (bottom)
-        if (provider.isFetchingMore)
-          Align(
-            alignment: Alignment.bottomCenter,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF1E222B),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(color: Colors.white.withOpacity(0.08)),
-                ),
-                child: Text(
-                  "Loading more...",
-                  style: GoogleFonts.outfit(color: Colors.white70, fontSize: 12),
-                ),
-              ),
-            ),
-          ),
-      ],
+    return GridView.builder(
+      controller: _scrollController,
+      padding: const EdgeInsets.all(4),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        crossAxisSpacing: 2,
+        mainAxisSpacing: 2,
+        childAspectRatio: 1.0,
+      ),
+      itemCount: provider.assets.length,
+      itemBuilder: (_, index) => _buildImageTile(provider.assets[index]),
     );
   }
 
