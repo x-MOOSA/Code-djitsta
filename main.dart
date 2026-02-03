@@ -2,12 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:photo_manager/photo_manager.dart';
 import 'package:provider/provider.dart';
+
 import 'providers/gallery_provider.dart';
 
 void main() {
   runApp(
     MultiProvider(
-      providers: [ChangeNotifierProvider(create: (_) => GalleryProvider())],
+      providers: [
+        ChangeNotifierProvider(create: (_) => GalleryProvider()),
+      ],
       child: const AiGalleryApp(),
     ),
   );
@@ -22,8 +25,8 @@ class AiGalleryApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'AI Gallery',
       theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0F1115), // Deep matte black
-        primaryColor: const Color(0xFF6C63FF), // Neon Purple
+        scaffoldBackgroundColor: const Color(0xFF0F1115),
+        primaryColor: const Color(0xFF6C63FF),
         hintColor: Colors.white24,
         textTheme: GoogleFonts.outfitTextTheme(ThemeData.dark().textTheme),
       ),
@@ -40,40 +43,57 @@ class GalleryScreen extends StatefulWidget {
 }
 
 class _GalleryScreenState extends State<GalleryScreen> {
+  final ScrollController _scrollController = ScrollController();
+
   @override
   void initState() {
     super.initState();
-    // Initialize provider after the first frame
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<GalleryProvider>().init();
+    });
+
+    _scrollController.addListener(() {
+      final provider = context.read<GalleryProvider>();
+      if (!_scrollController.hasClients) return;
+
+      final pos = _scrollController.position;
+      final nearEnd = pos.pixels >= (pos.maxScrollExtent - 800);
+
+      if (nearEnd && provider.hasMore && !provider.isFetchingMore) {
+        provider.fetchNextPage();
+      }
     });
   }
 
   @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // Listen to provider changes
     final provider = context.watch<GalleryProvider>();
 
     return Scaffold(
       body: NestedScrollView(
         floatHeaderSlivers: true,
-        headerSliverBuilder: (context, innerBoxIsScrolled) => [
+        headerSliverBuilder: (context, _) => [
           SliverAppBar(
             floating: true,
             snap: true,
             backgroundColor: const Color(0xFF0F1115).withOpacity(0.95),
             elevation: 0,
-            expandedHeight: 130, // Height for Search + Filters
+            expandedHeight: 130,
             flexibleSpace: FlexibleSpaceBar(
               background: SafeArea(
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
                   child: Column(
                     children: [
-                      // SEARCH BAR
-                      _buildSearchBar(context, provider),
+                      _buildSearchBar(provider),
                       const SizedBox(height: 12),
-                      // ALBUM FILTERS
                       _buildAlbumSelector(provider),
                     ],
                   ),
@@ -82,14 +102,12 @@ class _GalleryScreenState extends State<GalleryScreen> {
             ),
           ),
         ],
-        body: _buildGalleryGrid(provider),
+        body: _buildGalleryBody(provider),
       ),
     );
   }
 
-  // --- UI COMPONENTS ---
-
-  Widget _buildSearchBar(BuildContext context, GalleryProvider provider) {
+  Widget _buildSearchBar(GalleryProvider provider) {
     return Container(
       height: 50,
       decoration: BoxDecoration(
@@ -105,7 +123,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
         ],
       ),
       child: TextField(
-        onChanged: (value) => provider.search(value),
+        onChanged: provider.search,
         style: GoogleFonts.outfit(color: Colors.white, fontSize: 16),
         decoration: InputDecoration(
           hintText: "Search 'Receipt', 'Cat', 'Wifi'...",
@@ -120,7 +138,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
                   scale: 0.4,
                   child: const CircularProgressIndicator(strokeWidth: 2),
                 )
-              : const Icon(Icons.mic, color: Colors.white38, size: 20),
+              : const Icon(Icons.search, color: Colors.white38, size: 20),
           border: InputBorder.none,
           contentPadding: const EdgeInsets.symmetric(vertical: 13),
         ),
@@ -147,14 +165,10 @@ class _GalleryScreenState extends State<GalleryScreen> {
               margin: const EdgeInsets.only(right: 10),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
-                color: isSelected
-                    ? const Color(0xFF6C63FF)
-                    : const Color(0xFF1E222B),
+                color: isSelected ? const Color(0xFF6C63FF) : const Color(0xFF1E222B),
                 borderRadius: BorderRadius.circular(20),
                 border: Border.all(
-                  color: isSelected
-                      ? Colors.transparent
-                      : Colors.white.withOpacity(0.1),
+                  color: isSelected ? Colors.transparent : Colors.white.withOpacity(0.1),
                 ),
               ),
               child: Text(
@@ -172,7 +186,7 @@ class _GalleryScreenState extends State<GalleryScreen> {
     );
   }
 
-  Widget _buildGalleryGrid(GalleryProvider provider) {
+  Widget _buildGalleryBody(GalleryProvider provider) {
     if (provider.isLoading) {
       return const Center(
         child: CircularProgressIndicator(color: Color(0xFF6C63FF)),
@@ -184,33 +198,50 @@ class _GalleryScreenState extends State<GalleryScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            const Icon(
-              Icons.image_not_supported_outlined,
-              size: 48,
-              color: Colors.white24,
-            ),
+            const Icon(Icons.image_not_supported_outlined, size: 48, color: Colors.white24),
             const SizedBox(height: 10),
-            Text(
-              "No images found",
-              style: GoogleFonts.outfit(color: Colors.white38),
-            ),
+            Text("No images found", style: GoogleFonts.outfit(color: Colors.white38)),
           ],
         ),
       );
     }
 
-    return GridView.builder(
-      padding: const EdgeInsets.all(4),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        crossAxisSpacing: 2,
-        mainAxisSpacing: 2,
-        childAspectRatio: 1.0,
-      ),
-      itemCount: provider.assets.length,
-      itemBuilder: (_, index) {
-        return _buildImageTile(provider.assets[index]);
-      },
+    return Stack(
+      children: [
+        GridView.builder(
+          controller: _scrollController,
+          padding: const EdgeInsets.all(4),
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 3,
+            crossAxisSpacing: 2,
+            mainAxisSpacing: 2,
+            childAspectRatio: 1.0,
+          ),
+          itemCount: provider.assets.length,
+          itemBuilder: (_, index) => _buildImageTile(provider.assets[index]),
+        ),
+
+        // Loading more indicator (bottom)
+        if (provider.isFetchingMore)
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E222B),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: Colors.white.withOpacity(0.08)),
+                ),
+                child: Text(
+                  "Loading more...",
+                  style: GoogleFonts.outfit(color: Colors.white70, fontSize: 12),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 
