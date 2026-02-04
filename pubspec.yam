@@ -1,7 +1,6 @@
 name: ai_gallery
-description: AI Gallery App
-publish_to: "none"
-
+description: AI Gallery Scanner (smooth thumbnails + smart search)
+publish_to: 'none'
 version: 1.0.0+1
 
 environment:
@@ -11,22 +10,10 @@ dependencies:
   flutter:
     sdk: flutter
 
-  cupertino_icons: ^1.0.8
-
-  # State management
   provider: ^6.1.2
-
-  # Permissions (ALL Android versions)
-  permission_handler: ^11.3.1
-  device_info_plus: ^10.1.2
-
-  # Gallery access (works well across Android versions)
-  photo_manager: ^3.1.1
-  photo_manager_image_provider: ^2.2.0
-
-  # Local DB (optional, but kept for scalable tags)
-  sqflite: ^2.3.3
-  path: ^1.9.0
+  photo_manager: ^3.0.0
+  photo_manager_image_provider: ^2.1.1
+  fuzzywuzzy: ^0.2.0
 
 dev_dependencies:
   flutter_test:
