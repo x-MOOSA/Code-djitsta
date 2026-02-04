@@ -1,244 +1,181 @@
 import 'dart:async';
-import 'dart:io';
-
 import 'package:flutter/foundation.dart';
+import 'package:fuzzywuzzy/fuzzywuzzy.dart';
 import 'package:photo_manager/photo_manager.dart';
 
-import '../services/ai_service.dart';
-import '../services/db_service.dart';
-
 class GalleryProvider extends ChangeNotifier {
-  // ---- DATA ----
+  // Main list (paged)
   final List<AssetEntity> _allAssets = [];
-  List<AssetEntity> _displayAssets = [];
-  List<AssetPathEntity> _albums = [];
-  AssetPathEntity? _currentAlbum;
+  List<AssetEntity> filteredAssets = [];
 
-  // Pagination
-  static const int _pageSize = 120;
-  int _currentPage = 0;
-  bool _hasMore = true;
-  bool _isFetchingMore = false;
+  // Album
+  AssetPathEntity? _album;
 
-  // AI + DB
-  final AiService _aiService = AiService();
-  final DbService _db = DbService.instance;
+  // Paging
+  int _page = 0;
+  final int _pageSize = 200;
+  bool isLoading = false;
+  bool hasMore = true;
 
-  // In-memory cache (assetId -> keywords)
-  final Map<String, String> _aiMemory = {};
+  // Search index (id -> normalized searchable text)
+  final Map<String, String> _searchTextById = {};
 
-  // ---- STATE ----
-  bool _isLoading = true;
-  bool _isIndexing = false;
-  String _lastQuery = '';
+  // Search
+  Timer? _debounce;
+  String _lastQuery = "";
 
-  // Cancel / throttle indexing
-  bool _stopIndexing = false;
+  // Public getters
+  List<AssetEntity> get allAssets => List.unmodifiable(_allAssets);
 
-  // ---- GETTERS ----
-  List<AssetEntity> get assets => _displayAssets;
-  List<AssetPathEntity> get albums => _albums;
-  AssetPathEntity? get currentAlbum => _currentAlbum;
-
-  bool get isLoading => _isLoading;
-  bool get isIndexing => _isIndexing;
-  bool get hasMore => _hasMore;
-  bool get isFetchingMore => _isFetchingMore;
-
-  // ---- INIT ----
   Future<void> init() async {
-    _isLoading = true;
-    notifyListeners();
+    await _requestPermissionAndLoad();
+  }
 
+  Future<void> _requestPermissionAndLoad() async {
     final PermissionState ps = await PhotoManager.requestPermissionExtend();
     if (!ps.isAuth) {
-      PhotoManager.openSetting();
-      _isLoading = false;
+      // permission denied
+      _allAssets.clear();
+      filteredAssets = [];
       notifyListeners();
       return;
     }
 
-    await _fetchAlbums();
-  }
+    // Get albums (only images)
+    final paths = await PhotoManager.getAssetPathList(
+      type: RequestType.image,
+      hasAll: true,
+      onlyAll: true,
+    );
 
-  Future<void> _fetchAlbums() async {
-    _albums = await PhotoManager.getAssetPathList(type: RequestType.image);
-
-    if (_albums.isEmpty) {
-      _isLoading = false;
+    if (paths.isEmpty) {
+      _allAssets.clear();
+      filteredAssets = [];
       notifyListeners();
       return;
     }
 
-    _currentAlbum = _albums.first;
-    await _loadFirstPage(_currentAlbum!);
+    _album = paths.first;
+    await refresh();
   }
 
-  // ---- ALBUM SWITCH ----
-  Future<void> changeAlbum(AssetPathEntity album) async {
-    _stopIndexing = true; // stop previous indexing
-    _currentAlbum = album;
-
-    _isLoading = true;
-    notifyListeners();
-
-    await _loadFirstPage(album);
-  }
-
-  // ---- PAGINATION ----
-  Future<void> _loadFirstPage(AssetPathEntity album) async {
+  Future<void> refresh() async {
+    _page = 0;
+    hasMore = true;
     _allAssets.clear();
-    _displayAssets = [];
-    _aiMemory.clear();
-
-    _currentPage = 0;
-    _hasMore = true;
-    _isFetchingMore = false;
-    _stopIndexing = false;
-    _lastQuery = '';
-
-    await _fetchNextPageInternal(album);
-
-    _isLoading = false;
+    _searchTextById.clear();
+    _lastQuery = "";
+    filteredAssets = [];
     notifyListeners();
 
-    // start background indexing
-    _startBackgroundIndexing();
+    await loadMore(); // load first page
   }
 
-  Future<void> fetchNextPage() async {
-    if (_currentAlbum == null) return;
-    if (!_hasMore || _isFetchingMore) return;
+  Future<void> loadMore() async {
+    if (isLoading || !hasMore || _album == null) return;
 
-    await _fetchNextPageInternal(_currentAlbum!);
+    isLoading = true;
     notifyListeners();
 
-    // Continue indexing new items
-    _startBackgroundIndexing();
-  }
+    final items = await _album!.getAssetListPaged(page: _page, size: _pageSize);
 
-  Future<void> _fetchNextPageInternal(AssetPathEntity album) async {
-    _isFetchingMore = true;
-    notifyListeners();
-
-    final page = await album.getAssetListPaged(page: _currentPage, size: _pageSize);
-
-    if (page.isEmpty) {
-      _hasMore = false;
-      _isFetchingMore = false;
-      return;
-    }
-
-    _allAssets.addAll(page);
-
-    // Load saved tags for this new page
-    final ids = page.map((e) => e.id).toList();
-    final saved = await _db.loadTagsForIds(ids);
-    _aiMemory.addAll(saved);
-
-    // Update display list based on current query
-    if (_lastQuery.isEmpty) {
-      _displayAssets = List.of(_allAssets);
+    if (items.isEmpty) {
+      hasMore = false;
     } else {
-      await _applySearchFromDb(_lastQuery);
+      _allAssets.addAll(items);
+      _page++;
+      // Build index for new items (async)
+      unawaited(_buildSearchIndexFor(items));
     }
 
-    _currentPage++;
-    _isFetchingMore = false;
-  }
+    // Apply current search (or show all)
+    _applySearch(_lastQuery);
 
-  // ---- INDEXING (smooth + stable) ----
-  Future<void> _startBackgroundIndexing() async {
-    if (_isIndexing) return;
-    _isIndexing = true;
-    notifyListeners();
-
-    _stopIndexing = false;
-
-    // Process only a limited number per run to keep UI smooth
-    // and avoid heating device.
-    const int perRunLimit = 80;
-    int done = 0;
-
-    for (final asset in _allAssets) {
-      if (_stopIndexing) break;
-      if (done >= perRunLimit) break;
-
-      if (_aiMemory.containsKey(asset.id)) continue;
-
-      File? file;
-      try {
-        file = await asset.file;
-      } catch (_) {
-        file = null;
-      }
-      if (file == null) continue;
-
-      final keywords = await _aiService.analyzeImage(file);
-      if (keywords.isNotEmpty) {
-        _aiMemory[asset.id] = keywords;
-
-        // Save persistently
-        await _db.upsertTag(assetId: asset.id, keywords: keywords);
-
-        // If user is actively searching, refresh results
-        if (_lastQuery.isNotEmpty) {
-          await _applySearchFromDb(_lastQuery);
-        }
-      } else {
-        // Even if empty, store in memory so we don't reprocess constantly
-        _aiMemory[asset.id] = '';
-      }
-
-      done++;
-
-      // Yield to UI every few items
-      if (done % 6 == 0) {
-        await Future.delayed(const Duration(milliseconds: 1));
-        notifyListeners();
-      }
-    }
-
-    _isIndexing = false;
+    isLoading = false;
     notifyListeners();
   }
 
-  // ---- SEARCH ----
+  Future<void> _buildSearchIndexFor(List<AssetEntity> items) async {
+    for (final a in items) {
+      final title = (await a.titleAsync) ?? "";
+      // you can add OCR text later like: "$title ${ocrTextById[a.id] ?? ""}"
+      _searchTextById[a.id] = _normalize(title);
+    }
+    // re-run search after index updates (if user already typed)
+    _applySearch(_lastQuery);
+    notifyListeners();
+  }
+
+  // Debounced call from UI
   void search(String query) {
-    _lastQuery = query.trim();
+    _lastQuery = query;
 
-    if (_lastQuery.isEmpty) {
-      _displayAssets = List.of(_allAssets);
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 180), () {
+      _applySearch(_lastQuery);
       notifyListeners();
-      return;
-    }
-
-    // Use DB FTS for best performance
-    _applySearchFromDb(_lastQuery);
+    });
   }
 
-  Future<void> _applySearchFromDb(String query) async {
-    final ids = await _db.searchAssetIds(query, limit: 600);
-
-    if (ids.isEmpty) {
-      _displayAssets = [];
-      notifyListeners();
-      return;
-    }
-
-    final idSet = ids.toSet();
-
-    // Keep ordering based on gallery order (fast + simple)
-    _displayAssets = _allAssets.where((a) => idSet.contains(a.id)).toList();
+  void clearSearch() {
+    _debounce?.cancel();
+    _lastQuery = "";
+    _applySearch("");
     notifyListeners();
   }
 
-  // ---- CLEANUP ----
-  @override
-  void dispose() {
-    _stopIndexing = true;
-    _aiService.dispose();
-    _db.close();
-    super.dispose();
+  void _applySearch(String query) {
+    final q = _normalize(query);
+
+    if (q.isEmpty) {
+      filteredAssets = List.of(_allAssets);
+      return;
+    }
+
+    final cheapMode = q.length <= 2;
+
+    final scored = <({AssetEntity asset, int score})>[];
+
+    for (final a in _allAssets) {
+      final haystack = _searchTextById[a.id] ?? "";
+
+      int score = 0;
+
+      // Fast boosts
+      if (haystack.contains(q)) score += 60;
+
+      final qTokens = q.split(' ').where((t) => t.isNotEmpty).toList();
+      if (qTokens.isNotEmpty) {
+        int hits = 0;
+        for (final t in qTokens) {
+          if (haystack.contains(t)) hits++;
+        }
+        score += hits * 20;
+      }
+
+      if (!cheapMode) {
+        // Fuzzy rankers
+        score += weightedRatio(q, haystack);
+        score += partialRatio(q, haystack);
+      }
+
+      if (score >= (cheapMode ? 40 : 80)) {
+        scored.add((asset: a, score: score));
+      }
+    }
+
+    scored.sort((a, b) => b.score.compareTo(a.score));
+    filteredAssets = scored.map((e) => e.asset).toList();
+  }
+
+  String _normalize(String s) {
+    final lower = s.toLowerCase();
+    return lower
+        .replaceAll(RegExp(r'[^a-z0-9\s]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
   }
 }
+
+// tiny helper so analyzer doesn’t complain
+void unawaited(Future<void> f) {}
